@@ -148,7 +148,8 @@ jobs:
           cd $GITHUB_WORKSPACE/westeros-minimal
           git init
           git remote add origin https://code.rdkcentral.com/r/components/opensource/westeros
-          git config core.sparseCheckout true
+          git sparse-checkout init --no-cone
+          git sparse-checkout set essos/essos-resmgr.h
           git pull --depth=1 origin master
           mkdir -p $GITHUB_WORKSPACE/entservices-resourcemonitor/plugin
           cp essos/essos-resmgr.h $GITHUB_WORKSPACE/entservices-resourcemonitor/plugin/
@@ -211,7 +212,8 @@ jobs:
           repository: rdkcentral/entservices-apis
           path: entservices-apis
           ref: ${{env.INTERFACES_REF}}
-          run: rm -rf $GITHUB_WORKSPACE/entservices-apis/jsonrpc/DTV.json
+      - name: Remove unsupported DTV definition
+        run: rm -rf "$GITHUB_WORKSPACE/entservices-apis/jsonrpc/DTV.json"
 
       - name: Apply patches entservices-apis
         run: |
