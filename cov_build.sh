@@ -22,9 +22,9 @@ cmake -G Ninja -S "$GITHUB_WORKSPACE" -B build/entservices-resourcemonitor \
 -DPLUGIN_RESOURCEMONITOR=ON \
 -DRDK_SERVICES_L1_TEST=OFF \
 -DRDK_SERVICE_L2_TEST=OFF \
--Wall -Werror -Wno-error=format \
--Wl,-wrap,system -Wl,-wrap,popen -Wl,-wrap,syslog \
--DDISABLE_SECURITY_TOKEN -DUSE_THUNDER_R4=ON -DTHUNDER_VERSION=4 -DTHUNDER_VERSION_MAJOR=4 -DTHUNDER_VERSION_MINOR=4" \
+-DCMAKE_CXX_FLAGS="-Wall -Werror -Wno-error=format" \
+ -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-wrap,system -Wl,-wrap,popen -Wl,-wrap,syslog" \
+ -DDISABLE_SECURITY_TOKEN=ON -DUSE_THUNDER_R4=ON -DTHUNDER_VERSION=4 -DTHUNDER_VERSION_MAJOR=4 -DTHUNDER_VERSION_MINOR=4 \
 
 cmake --build build/entservices-resourcemonitor --target install
 echo "======================================================================================"

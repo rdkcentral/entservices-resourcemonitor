@@ -21,47 +21,94 @@
 #pragma once
 #include <string>
 #include <cstdint>
+#include <limits>
 #include <rfcapi.h>
 
 
 namespace Utils {
-inline bool ApplyRFCInt(const char* rfcName, uint32_t& target) {
+
+inline bool ApplyRFCInt(const char* rfcName, uint32_t& target)
+{
     RFC_ParamData_t param{};
     WDMP_STATUS status = getRFCParameter(nullptr, rfcName, &param);
-    if (status == WDMP_SUCCESS && param.value[0] != '\0') {
-        target = std::stoull(param.value);
+    if (status != WDMP_SUCCESS || param.value[0] == '\0') {
+        return false;
+    }
+    try {
+        size_t pos = 0;
+        unsigned long long value = std::stoull(param.value, &pos);
+        if (param.value[pos] != '\0') {
+            return false;
+        }
+        if (value > std::numeric_limits<uint32_t>::max()) {
+            return false;
+        }
+        target = static_cast<uint32_t>(value);
         return true;
     }
-    return false;
+    catch (const std::exception&) {
+        return false;
+    }
 }
 
-inline bool ApplyRFCInt64(const char* rfcName, uint64_t& target) {
+inline bool ApplyRFCInt64(const char* rfcName, uint64_t& target)
+{
     RFC_ParamData_t param{};
     WDMP_STATUS status = getRFCParameter(nullptr, rfcName, &param);
-    if (status == WDMP_SUCCESS && param.value[0] != '\0') {
-        target = std::stoull(param.value);
+    if (status != WDMP_SUCCESS || param.value[0] == '\0') {
+        return false;
+    }
+    try {
+        size_t pos = 0;
+        uint64_t value = std::stoull(param.value, &pos);
+        if (param.value[pos] != '\0') {
+            return false;
+        }
+        target = value;
         return true;
     }
-    return false;
+    catch (const std::exception&) {
+        return false;
+    }
 }
 
-inline bool ApplyRFCIntdouble(const char* rfcName, double& target) {
+inline bool ApplyRFCIntDouble(const char* rfcName, double& target)
+{
     RFC_ParamData_t param{};
     WDMP_STATUS status = getRFCParameter(nullptr, rfcName, &param);
-    if (status == WDMP_SUCCESS && param.value[0] != '\0') {
-        target = std::stod(param.value);
+    if (status != WDMP_SUCCESS || param.value[0] == '\0') {
+        return false;
+    }
+    try {
+        size_t pos = 0;
+        double value = std::stod(param.value, &pos);
+        if (param.value[pos] != '\0') {
+            return false;
+        }
+        target = value;
         return true;
     }
-    return false;
+    catch (const std::exception&) {
+        return false;
+    }
 }
 
-inline bool ApplyRFCBool(const char* rfcName, bool& target) {
+inline bool ApplyRFCBool(const char* rfcName, bool& target)
+{
     RFC_ParamData_t param{};
     WDMP_STATUS status = getRFCParameter(nullptr, rfcName, &param);
-    if (status == WDMP_SUCCESS && param.value[0] != '\0') {
-        target = (std::string(param.value) == "true" || std::string(param.value) == "1");
+    if (status != WDMP_SUCCESS || param.value[0] == '\0') {
+        return false;
+    }
+    std::string value(param.value);
+    if (value == "true" || value == "1") {
+        target = true;
+        return true;
+    }
+    if (value == "false" || value == "0") {
+        target = false;
         return true;
     }
     return false;
 }
-}
+} // namespace Utils

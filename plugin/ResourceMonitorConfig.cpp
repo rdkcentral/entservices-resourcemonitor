@@ -19,11 +19,10 @@
 
 
 #include "ResourceMonitorConfig.h"
-#include "UtilsRFCConfig.h"
 #include "UtilsLogging.h"
 #include <tracing/Logging.h>
 #ifdef WITH_RFC
-#include <rfcapi.h>
+#include "UtilsRFCConfig.h"
 #endif
 
 namespace WPEFramework {
@@ -270,10 +269,12 @@ bool ResourceMonitorConfig::Load(const ResourceMonitorConfigJSON& json)
     }
 
     #ifdef WITH_RFC
-        if (Utils::ApplyRFCInt(ResourceMonitorConfig::RFC_POLLING_INTERVAL, _pollingInterval)){
+        uint32_t rfcPollingInterval = _pollingInterval;
+        if (Utils::ApplyRFCInt(ResourceMonitorConfig::RFC_POLLING_INTERVAL, rfcPollingInterval) && IsValidPollingInterval(rfcPollingInterval)) {
+            _pollingInterval = rfcPollingInterval;
             LOGINFO("RFC PollingInterval applied: %u", _pollingInterval);
         } else {
-            LOGWARN("No RFC PollingInterval override, using %u", _pollingInterval);
+            LOGWARN("No valid RFC PollingInterval override, using %u", _pollingInterval);
         }
         if (Utils::ApplyRFCBool(ResourceMonitorConfig::RFC_LOW_MEMORY_WARNING, _lowMemoryWarningsEnabled)) {
             LOGINFO("RFC LOW MEMORY WARNING Applied : %u", _lowMemoryWarningsEnabled);
@@ -290,7 +291,7 @@ bool ResourceMonitorConfig::Load(const ResourceMonitorConfigJSON& json)
         } else {
             LOGWARN("No RFC WARNING MAX SWAP override, using : %u", _warningThresholdMaxSwapPercentage);
         }
-        if (Utils::ApplyRFCIntdouble(ResourceMonitorConfig::RFC_WARNING_MAX_PSI, _warningThresholdMaxPsi)) {
+        if (Utils::ApplyRFCIntDouble(ResourceMonitorConfig::RFC_WARNING_MAX_PSI, _warningThresholdMaxPsi)) {
             LOGINFO("RFC WARNING MAX PSI applied: %.2f", _warningThresholdMaxPsi);
         } else {
             LOGWARN("No RFC WARNING MAX PSI override, using: %.2f", _warningThresholdMaxPsi);
@@ -315,6 +316,7 @@ bool ResourceMonitorConfig::Load(const ResourceMonitorConfigJSON& json)
     // Calculate derived thresholds.
     if (!CalculateMemoryThresholds()) {
         LOGWARN("Invalid calculated memory thresholds.Reverting warning threshold to default.");
+        _warningThresholdMinMem = ResourceMonitorConfig::DEFAULT_WARNING_MIN_MEM;
         _softThresholdDeltaPercentage = ResourceMonitorConfig::DEFAULT_SOFT_THRESHOLD_DELTA;
         _hardThresholdDeltaPercentage = ResourceMonitorConfig::DEFAULT_HARD_THRESHOLD_DELTA;
         CalculateMemoryThresholds();
@@ -322,6 +324,7 @@ bool ResourceMonitorConfig::Load(const ResourceMonitorConfigJSON& json)
 
     if (!CalculateSwapThresholds()) {
         LOGWARN("Invalid calculated swap thresholds. Reverting warning threshold to default.");
+        _warningThresholdMaxSwapPercentage = ResourceMonitorConfig::DEFAULT_WARNING_MAX_SWAP;
         _softThresholdDeltaPercentage = ResourceMonitorConfig::DEFAULT_SOFT_THRESHOLD_DELTA;
         _hardThresholdDeltaPercentage = ResourceMonitorConfig::DEFAULT_HARD_THRESHOLD_DELTA;
         CalculateSwapThresholds();
@@ -329,6 +332,7 @@ bool ResourceMonitorConfig::Load(const ResourceMonitorConfigJSON& json)
 
     if (!CalculatePsiThresholds()) {
         LOGWARN("Invalid calculated PSI thresholds. Reverting warning threshold to default.");
+        _warningThresholdMaxPsi = ResourceMonitorConfig::DEFAULT_WARNING_MAX_PSI;
         _softThresholdDeltaPercentage = ResourceMonitorConfig::DEFAULT_SOFT_THRESHOLD_DELTA;
         _hardThresholdDeltaPercentage = ResourceMonitorConfig::DEFAULT_HARD_THRESHOLD_DELTA;
         CalculatePsiThresholds();

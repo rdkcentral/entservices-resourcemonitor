@@ -144,6 +144,10 @@ namespace WPEFramework {
             mService->Unregister(&mResourceMonitorNotification);
             mService->Release();
             mService = nullptr;
+			if (nullptr != mConfigure) {
+                mConfigure->Release();
+                mConfigure = nullptr;
+            }
             SYSLOG(Logging::Shutdown, (string(_T("ResourceMonitor de-initialised"))));
         }
 

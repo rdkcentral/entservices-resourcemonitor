@@ -43,6 +43,13 @@ curl -X POST http://127.0.0.1:9998/jsonrpc -H "Content-Type: application/json" -
     "method":"org.rdk.ResourceMonitor.GetFlashSpace"
 }'
 
+4. GetStats:
+curl -X POST http://127.0.0.1:9998/jsonrpc -H "Content-Type: application/json" -d '{
+    "jsonrpc":"2.0",
+    "id":5,
+    "method":"org.rdk.ResourceMonitor.GetStats"
+}'
+
 ```
 
 ## Responses
@@ -59,6 +66,8 @@ GetSwapUsed:
 GetPsiMetrics:
 {"jsonrpc":"2.0","id":3,"result":0}
 
+GetStats:
+{"jsonrpc":"2.0","id":2,"result":{"systemMemTotal":7858720,"systemMemUsed":366156,"systemMemAvailable":7492564,"peakSystemMemUsed":366156,"gpuMemTotal":0,"gpuMemUsed":0,"gpuMemAvailable":0,"peakGpuMemUsed":0,"swapTotal":7674528,"swapFree":7674528,"swapUsed":4096,"peakSwapUsed":4096,"flashSpaceTotal":1012768768,"flashSpaceUsed":495165440,"flashSpaceAvailable":517603328,"peakFlashSpaceUsed":495165440}}
 
 ```
 

@@ -31,6 +31,7 @@
 #include <fstream>
 #include <chrono>
 #include <thread>
+#include <dirent.h>
 #include <sys/statvfs.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -74,14 +75,9 @@ namespace WPEFramework {
             LOGINFO("ResourceMonitorImplementation Destructor");
             _reactiveMonitorRunning = false;
 
+            _reactiveMonitorCv.notify_all();
             if (_reactiveMonitorThread.joinable()) {
                 _reactiveMonitorThread.join();
-            }
-            if (_victimSelector != nullptr) {
-                _victimSelector->Unregister(&_victimSelectorNotification);
-                _victimSelector->Release();
-                _victimSelector = nullptr;
-                LOGINFO("VictimSelector notification unregistered");
             }
             {
                 std::lock_guard<std::mutex> lock(_reconcileMutex);
@@ -92,12 +88,16 @@ namespace WPEFramework {
             if (_reconcileThread.joinable()) {
                 _reconcileThread.join();
             }
-
-            if (_rservice != nullptr) {
+            if (_victimSelector != nullptr) {
+                _victimSelector->Unregister(&_victimSelectorNotification);
+                _victimSelector->Release();
+                _victimSelector = nullptr;
+                LOGINFO("VictimSelector notification unregistered");
+            }
+			if (_rservice != nullptr) {
                 _rservice->Release();
                 _rservice = nullptr;
             }
-
             if (_instance == this) {
                 _instance = nullptr;
             }
@@ -118,10 +118,25 @@ namespace WPEFramework {
                     LOGERR("VictimSelector Interface is unavailable. ResourceMonitor will continue without Evict support");
                     result = Core::ERROR_NONE;
                 } else {
-                    _victimSelector->Register(&_victimSelectorNotification);
-                    LOGINFO("VictimSelector notification registered");
-                    result = Core::ERROR_NONE;
+                    const auto registerResult = _victimSelector->Register(&_victimSelectorNotification);
+                    if (registerResult != Core::ERROR_NONE) {
+                        LOGERR("VictimSelector notification registration failed. Evict support disabled");
+                        _victimSelector->Release();
+                        _victimSelector = nullptr;
+                        result = Core::ERROR_GENERAL;
+                    } else {
+                        LOGINFO("VictimSelector notification registered");
+                        result = Core::ERROR_NONE;
+                    }
                 }
+            }
+            if (!_reactiveMonitorRunning) {
+                _reactiveMonitorRunning = true;
+               _reactiveMonitorThread = std::thread(&ResourceMonitorImplementation::ReactiveMonitorLoop, this);
+            }
+
+            if (!_reconcileThread.joinable()) {
+                _reconcileThread = std::thread(&ResourceMonitorImplementation::ReconcileWorker, this);
             }
             SYSLOG(Logging::Startup, (_T("VictimSelector exit: result=%d"), result));
             return result;
@@ -139,15 +154,6 @@ namespace WPEFramework {
 
             _config.Load(configJSON);
             LOGINFO("ResourceMonitorImplementation configuration loaded");
-
-            if (!_reactiveMonitorRunning) {
-                _reactiveMonitorRunning = true;
-               _reactiveMonitorThread = std::thread(&ResourceMonitorImplementation::ReactiveMonitorLoop, this);
-            }
-
-            if (!_reconcileThread.joinable()) {
-                _reconcileThread = std::thread(&ResourceMonitorImplementation::ReconcileWorker, this);
-            }
             return Core::ERROR_NONE;
 
         }
@@ -239,11 +245,28 @@ namespace WPEFramework {
 
         Core::hresult ResourceMonitorImplementation::GetPsiMetrics(const string& metric, double& value, uint64_t& total)
         {
-            const PsiMetric m = _config.GetPsiMetric();
+            PsiMetric m = _config.GetPsiMetric();
             const char* group = "";
             const char* avg = "";
             std::string line = "";
             std::string token = "";
+
+            if (!metric.empty()) {
+                if (metric == "some_avg10")
+                    m = PsiMetric::SOME_AVG10;
+                else if (metric == "some_avg60")
+                    m = PsiMetric::SOME_AVG60;
+                else if (metric == "some_avg300")
+                    m = PsiMetric::SOME_AVG300;
+                else if (metric == "full_avg10")
+                    m = PsiMetric::FULL_AVG10;
+                else if (metric == "full_avg60")
+                    m = PsiMetric::FULL_AVG60;
+                else if (metric == "full_avg300")
+                    m = PsiMetric::FULL_AVG300;
+                else
+                    return Core::ERROR_BAD_REQUEST;
+            }
 
             LOGINFO("Entering GetPsiMetrics()");
             value = 0.0;
@@ -299,9 +322,8 @@ namespace WPEFramework {
                 while (ss >> token) {
                     if (token.rfind(avg, 0) == 0) {
                         try {
-                            value = std::stod(
-                                token.substr(std::string(avg).length()));
-                            return Core::ERROR_NONE;
+                            value = std::stod(token.substr(std::string(avg).length()));
+                            continue;
                         }
                         catch (...) {
                             return Core::ERROR_GENERAL;
@@ -319,6 +341,34 @@ namespace WPEFramework {
                 return Core::ERROR_NONE;
             }
             return Core::ERROR_UNKNOWN_KEY;
+        }
+
+        uint64_t ResourceMonitorImplementation::CalculateDirectorySize(const std::string& path)
+        {
+            uint64_t totalSize = 0;
+            DIR* dir = opendir(path.c_str());
+            if (dir == nullptr) {
+                return 0;
+            }
+            struct dirent* entry = nullptr;
+            while ((entry = readdir(dir)) != nullptr) {
+                if ((strcmp(entry->d_name, ".") == 0) ||
+                    (strcmp(entry->d_name, "..") == 0)) {
+                    continue;
+                }
+                std::string fullPath = path + "/" + entry->d_name;
+                struct stat st {};
+                if (lstat(fullPath.c_str(), &st) != 0) {
+                    continue;
+                }
+                if (S_ISDIR(st.st_mode)) {
+                    totalSize += CalculateDirectorySize(fullPath);
+                } else {
+                    totalSize += static_cast<uint64_t>(st.st_size);
+                }
+            }
+            closedir(dir);
+            return totalSize;
         }
 
         Core::hresult ResourceMonitorImplementation::GetFlashSpace(uint64_t& total, uint64_t& used, uint64_t& available)
@@ -352,15 +402,7 @@ namespace WPEFramework {
             return Core::ERROR_GENERAL;
         }
 
-        std::string command = "du -sb " + mountPoint + " 2>/dev/null";
-        FILE* pipe = popen(command.c_str(), "r");
-        if (pipe != nullptr) {
-            unsigned long long size = 0;
-            if (fscanf(pipe, "%llu", &size) == 1) {
-                directoryUsedBytes = static_cast<uint64_t>(size);
-            }
-            pclose(pipe);
-        }
+        directoryUsedBytes = CalculateDirectorySize(mountPoint);
 
         total = configuredSizeBytes;
         used = directoryUsedBytes;
@@ -448,8 +490,8 @@ namespace WPEFramework {
 
             GetSwapUsed(swapUsed, memUsedTotal);
 
-            stats.swapTotal = swapTotal;
-            stats.swapFree = swapFree;
+            stats.swapTotal = swapTotal * 1024ULL;
+            stats.swapFree = swapFree * 1024ULL;
             stats.swapUsed = swapUsed;
 
             if (swapUsed > _peakSwapUsed)
@@ -507,7 +549,13 @@ namespace WPEFramework {
 
                 EvaluateResourceThresholds(memAvailable, swapFree, swapTotal, psiFullAvg60);
                 // Wait until next poll
-                std::this_thread::sleep_for(std::chrono::milliseconds(_config.PollingInterval()));
+                std::unique_lock<std::mutex> lock(_reactiveMonitorMutex);
+                _reactiveMonitorCv.wait_for(
+                    lock,
+                    std::chrono::milliseconds(_config.PollingInterval()),
+                    [this] {
+                    return !_reactiveMonitorRunning.load();
+                    });
             }
             LOGINFO("Reactive monitor stopped");
         }
@@ -565,7 +613,7 @@ namespace WPEFramework {
                         if (_psiThresholdExceededSince == 0) {
                             _psiThresholdExceededSince = nowMs;
                         }
-                        if ((nowMs - _psiThresholdExceededSince) >= _config.PsiExcessDuration()) {
+                        if (_lastPsiActionTime == 0 || (nowMs - _psiThresholdExceededSince) >= _config.PsiExcessDuration()) {
                             if ((nowMs - _lastPsiActionTime) >= _config.PsiPostActionDelay()) {
                                 LOGWARN("Hard PSI threshold exceeded");
                                 Evict("HardPsiThresholdExceeded", "Kill");
@@ -669,12 +717,14 @@ namespace WPEFramework {
                 return Core::ERROR_BAD_REQUEST;
             }
             LOGINFO("Entering Reconcile(): appId=%s ramTargetMB=%u allowTerminate=%s", appId.c_str(), ramTargetMB, allowTerminate ? _T("true") : _T("false"));
+            size_t queueSize = 0;
             {
                 std::lock_guard<std::mutex> lock(_reconcileMutex);
                 _reconcileRequests.push(request);
+                queueSize = _reconcileRequests.size();
                 _reconcileConditionVariable.notify_one();
             }
-            LOGINFO("Queued reconcile request for appId=%s, queueSize=%zu", appId.c_str(), _reconcileRequests.size());
+            LOGINFO("Queued reconcile request for appId=%s, queueSize=%zu", appId.c_str(), queueSize);
             return Core::ERROR_NONE;
         }
 
@@ -775,16 +825,15 @@ namespace WPEFramework {
             LOGINFO("VictimSelector::OnEvictComplete: evicted=%s errorCode=%u", evicted ? _T("true") : _T("false"), static_cast<uint32_t>(errorCode));
 
             // No active Reconcile. This eviction was triggered by the reactive resource monitoring path.
-            _adminLock.Lock();
-            if (!_reconcileInProgress) {
-                _adminLock.Unlock();
-                LOGINFO("VictimSelector eviction is not part of reconciliation");
-                return;
+            {
+                std::lock_guard<std::mutex> lock(_reconcileMutex);
+                if (!_reconcileInProgress) {
+                    LOGINFO("VictimSelector eviction is not part of reconciliation");
+                    return;
+                }
+                appId = _reconcileAppId;
+                appMemoryLimitKb = _reconcileAppSystemMemoryLimitKb;
             }
-
-            appId = _reconcileAppId;
-            appMemoryLimitKb = _reconcileAppSystemMemoryLimitKb;
-            _adminLock.Unlock();
 
             // VictimSelector could not evict a victim.
             if (!evicted) {

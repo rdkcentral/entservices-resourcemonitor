@@ -90,6 +90,7 @@ namespace Plugin {
         void OnEvictComplete(const bool evicted, const Exchange::IVictimSelector::EvictErrorReason errorCode);
         Core::hresult Evict(const std::string& reason, const std::string& action);
         Core::hresult Configure(PluginHost::IShell* service);
+        uint64_t CalculateDirectorySize(const std::string& path);
 
         struct ReconcileRequest {
             string appId;
@@ -109,6 +110,8 @@ namespace Plugin {
         ResourceMonitorConfig _config;
         std::atomic<bool> _reactiveMonitorRunning;
         std::thread _reactiveMonitorThread;
+        std::mutex _reactiveMonitorMutex;
+        std::condition_variable _reactiveMonitorCv;
 
         uint64_t _warningStartTime;
         bool _warningPrinted;
