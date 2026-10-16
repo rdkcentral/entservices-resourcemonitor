@@ -192,11 +192,11 @@ private:
     bool IsValidMemoryWarningThreshold(uint64_t value) const;
     bool IsValidPercentage(uint32_t value) const;
 
+    bool ValidateThresholdConfiguration();
     bool CalculateMemoryThresholds();
     bool CalculateSwapThresholds();
     bool CalculatePsiThresholds();
 
-private:
 
     bool _psiCheckingEnabled;
     bool _zramCheckingEnabled;

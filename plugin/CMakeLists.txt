@@ -20,7 +20,7 @@ set(MODULE_NAME ${NAMESPACE}${PLUGIN_NAME})
 set(PLUGIN_IMPLEMENTATION ${MODULE_NAME}Implementation)
 
 set(PLUGIN_RESOURCEMONITOR_AUTOSTART True CACHE STRING "Automatically start ResourceMonitor plugin")
-set(PLUGIN_RESOURCEMONITOR_MODE "Off" CACHE STRING "Controls if the plugin should run in its own process, in process or remote")
+set(PLUGIN_RESOURCEMONITOR_STARTMODE "Off" CACHE STRING "Controls if the plugin should run in its own process, in process or remote")
 set(PLUGIN_RESOURCEMONITOR_STARTUPORDER "" CACHE STRING "To configure startup order of ResourceManager plugin")
 
 

@@ -79,18 +79,24 @@ namespace Plugin {
             ResourceMonitorImplementation& _parent;
         };
 
+        enum class EvictionOwner {
+            NONE,
+            REACTIVE,
+            RECONCILE
+        };
+
         Core::hresult SetConfig(const string& config);
         void ReactiveMonitorLoop();
-        void EvaluateResourceThresholds(uint64_t memAvailable, uint64_t swapFree, uint64_t swapTotal, double psiFullAvg60);
+        void EvaluateResourceThresholds(bool memInfoValid, uint64_t memAvailable, uint64_t swapFree, uint64_t swapTotal, double psiFullAvg60);
         bool IsSoftThresholdExceeded(uint64_t memAvailable, uint64_t swapFree, uint64_t swapTotal, double psiFullAvg60) const;
         bool IsHardThresholdExceeded(uint64_t memAvailable, uint64_t swapFree, uint64_t swapTotal, double psiFullAvg60) const;
         bool IsWarningThresholdExceeded(uint64_t memAvailable, uint64_t swapFree, uint64_t swapTotal, double psiFullAvg60) const;
         uint32_t CalculateSwapPercentage(uint64_t swapFree, uint64_t swapTotal) const;
         void OnReconciliationComplete(const string& appId, const bool targetRamAchieved);
         void OnEvictComplete(const bool evicted, const Exchange::IVictimSelector::EvictErrorReason errorCode);
-        Core::hresult Evict(const std::string& reason, const std::string& action);
+        Core::hresult Evict(const std::string& reason, const std::string& action, EvictionOwner owner);
         Core::hresult Configure(PluginHost::IShell* service);
-        uint64_t CalculateDirectorySize(const std::string& path);
+        Core::hresult CalculateDirectorySize(const std::string& path, uint64_t& totalSize);
 
         struct ReconcileRequest {
             string appId;
@@ -122,12 +128,14 @@ namespace Plugin {
         bool _reconcileInProgress;
         std::atomic<bool> _workerRunning;
         std::atomic<bool> _evictionInProgress;
+        std::atomic<bool> _initialized;
         std::string _reconcileAppId;
         std::queue<ReconcileRequest> _reconcileRequests;
         std::thread _reconcileThread;
         std::condition_variable _reconcileConditionVariable;
         std::mutex _reconcileMutex;
 
+        std::atomic<EvictionOwner> _evictionOwner;
         Exchange::IVictimSelector* _victimSelector;
         Core::Sink<VictimSelectorNotification> _victimSelectorNotification;
 

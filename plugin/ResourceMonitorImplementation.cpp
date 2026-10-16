@@ -60,7 +60,9 @@ namespace WPEFramework {
             , _reconcileInProgress(false)
             , _workerRunning(true)
             , _evictionInProgress(false)
+            , _initialized(false)
             , _reconcileAppId("")
+            , _evictionOwner(EvictionOwner::NONE)
             , _victimSelector(nullptr)
             , _victimSelectorNotification(this)
             , _adminLock()
@@ -73,7 +75,10 @@ namespace WPEFramework {
         ResourceMonitorImplementation::~ResourceMonitorImplementation() 
         {
             LOGINFO("ResourceMonitorImplementation Destructor");
-            _reactiveMonitorRunning = false;
+            {
+                std::lock_guard<std::mutex> lock(_reactiveMonitorMutex);
+                _reactiveMonitorRunning = false;
+            }
 
             _reactiveMonitorCv.notify_all();
             if (_reactiveMonitorThread.joinable()) {
@@ -94,7 +99,15 @@ namespace WPEFramework {
                 _victimSelector = nullptr;
                 LOGINFO("VictimSelector notification unregistered");
             }
-			if (_rservice != nullptr) {
+			std::list<Exchange::IResourceMonitor::INotification*> notifications;
+            {
+                Core::SafeSyncType<Core::CriticalSection> lock(_adminLock);
+                notifications.swap(_notifications);
+            }
+            for (auto* notification : notifications) {
+                notification->Release();
+            }
+            if (_rservice != nullptr) {
                 _rservice->Release();
                 _rservice = nullptr;
             }
@@ -138,12 +151,17 @@ namespace WPEFramework {
             if (!_reconcileThread.joinable()) {
                 _reconcileThread = std::thread(&ResourceMonitorImplementation::ReconcileWorker, this);
             }
+            _initialized.store(true);
             SYSLOG(Logging::Startup, (_T("VictimSelector exit: result=%d"), result));
             return result;
         }
 
         Core::hresult ResourceMonitorImplementation::SetConfig(const string& config)
         {
+            if (_initialized.load()) {
+                LOGERR("SetConfig is not allowed after initialization");
+                return Core::ERROR_ILLEGAL_STATE;
+            }
             ResourceMonitorConfigJSON configJSON;
             if (!config.empty()) {
                 if (!configJSON.FromString(config)) {
@@ -151,7 +169,6 @@ namespace WPEFramework {
                     return Core::ERROR_BAD_REQUEST;
                 }
             }
-
             _config.Load(configJSON);
             LOGINFO("ResourceMonitorImplementation configuration loaded");
             return Core::ERROR_NONE;
@@ -343,12 +360,13 @@ namespace WPEFramework {
             return Core::ERROR_UNKNOWN_KEY;
         }
 
-        uint64_t ResourceMonitorImplementation::CalculateDirectorySize(const std::string& path)
+        Core::hresult ResourceMonitorImplementation::CalculateDirectorySize(const std::string& path, uint64_t& totalSize)
         {
-            uint64_t totalSize = 0;
+            totalSize = 0;
             DIR* dir = opendir(path.c_str());
-            if (dir == nullptr) {
-                return 0;
+            if (!dir) {
+                LOGERR("Failed to open directory %s", path.c_str());
+                return Core::ERROR_GENERAL;
             }
             struct dirent* entry = nullptr;
             while ((entry = readdir(dir)) != nullptr) {
@@ -359,16 +377,25 @@ namespace WPEFramework {
                 std::string fullPath = path + "/" + entry->d_name;
                 struct stat st {};
                 if (lstat(fullPath.c_str(), &st) != 0) {
-                    continue;
+                    LOGERR("lstat failed for %s", fullPath.c_str());
+                    closedir(dir);
+                    return Core::ERROR_GENERAL;
                 }
                 if (S_ISDIR(st.st_mode)) {
-                    totalSize += CalculateDirectorySize(fullPath);
-                } else {
+                    uint64_t childSize = 0;
+                    Core::hresult result = CalculateDirectorySize(fullPath, childSize);
+                    if (result != Core::ERROR_NONE) {
+                        closedir(dir);
+                        return result;
+                    }
+                    totalSize += childSize;
+                }
+                else {
                     totalSize += static_cast<uint64_t>(st.st_size);
                 }
             }
             closedir(dir);
-            return totalSize;
+            return Core::ERROR_NONE;
         }
 
         Core::hresult ResourceMonitorImplementation::GetFlashSpace(uint64_t& total, uint64_t& used, uint64_t& available)
@@ -377,6 +404,8 @@ namespace WPEFramework {
         const uint64_t configuredSizeMB = _config.FlashSpaceForHibernatedAppsSize();
         const uint64_t configuredSizeBytes = configuredSizeMB * 1024ULL * 1024ULL;
         uint64_t directoryUsedBytes = 0;
+        uint64_t quotaRemaining = 0;
+        uint64_t filesystemAvailable = 0;
 
         LOGINFO("Entering GetFlashSpace()");
     
@@ -384,7 +413,7 @@ namespace WPEFramework {
         struct stat statBuffer {};
         if (stat(mountPoint.c_str(), &statBuffer) != 0) {
             if (errno == ENOENT) {
-                if (mkdir(mountPoint.c_str(), 0744) != 0) {
+                if (mkdir(mountPoint.c_str(), 0744) != 0 && errno != EEXIST) {
                     LOGERR("Failed to create hibernated apps path=%s", mountPoint.c_str());
                     return Core::ERROR_GENERAL;
                 }
@@ -402,11 +431,17 @@ namespace WPEFramework {
             return Core::ERROR_GENERAL;
         }
 
-        directoryUsedBytes = CalculateDirectorySize(mountPoint);
+        Core::hresult result = CalculateDirectorySize(mountPoint, directoryUsedBytes);
+        if (result != Core::ERROR_NONE) {
+            LOGERR("Directory size calculation failed");
+            return result;
+        }
 
         total = configuredSizeBytes;
         used = directoryUsedBytes;
-        available = (used >= total) ? 0 : (total - used);
+        quotaRemaining = (used >= total) ? 0 : (total - used);
+        filesystemAvailable = static_cast<uint64_t>(vfs.f_bavail) * static_cast<uint64_t>(vfs.f_frsize);
+        available = std::min(quotaRemaining, filesystemAvailable);
     
         LOGINFO("Flash mount point=%s Total=%llu Used=%llu Available=%llu",
             mountPoint.c_str(),
@@ -448,6 +483,7 @@ namespace WPEFramework {
 
         Core::hresult ResourceMonitorImplementation::GetStats(WPEFramework::Exchange::ResourceMonitorStats& stats)
         {
+            Core::SafeSyncType<Core::CriticalSection> lock(_adminLock);
             uint64_t memAvailable = 0;
             uint64_t swapFree = 0;
             uint64_t swapTotal = 0;
@@ -460,15 +496,28 @@ namespace WPEFramework {
             uint64_t flashTotal = 0;
             uint64_t flashUsed = 0;
             uint64_t flashAvailable = 0;
+            Core::hresult result;
 
             LOGINFO("Entering GetStats");
             memset(&stats, 0, sizeof(stats));
-            GetMemInfo(memAvailable, swapFree, swapTotal);
+            result = GetMemInfo(memAvailable, swapFree, swapTotal);
+            if (result != Core::ERROR_NONE) {
+                LOGERR("GetStats: GetMemInfo failed");
+                return result;
+            }
 
             std::ifstream mem("/proc/meminfo");
+            if (!mem.is_open()) {
+                LOGERR("GetStats: Failed to open /proc/meminfo");
+                return Core::ERROR_GENERAL;
+            }
             while (mem >> key >> value >> unit) {
                 if (key == "MemTotal:")
                     memTotal = value;
+            }
+            if (memTotal == 0) {
+                LOGERR("GetStats: Failed to read MemTotal");
+                return Core::ERROR_GENERAL;
             }
 
             stats.systemMemTotal = memTotal;
@@ -488,7 +537,11 @@ namespace WPEFramework {
             stats.gpuMemAvailable = 0;
             stats.peakGpuMemUsed = _peakGpuMemUsed;
 
-            GetSwapUsed(swapUsed, memUsedTotal);
+            result = GetSwapUsed(swapUsed, memUsedTotal);
+            if (result != Core::ERROR_NONE) {
+                LOGERR("GetStats: GetSwapUsed failed");
+                return result;
+            }
 
             stats.swapTotal = swapTotal * 1024ULL;
             stats.swapFree = swapFree * 1024ULL;
@@ -500,7 +553,11 @@ namespace WPEFramework {
             }
             stats.peakSwapUsed = _peakSwapUsed;
 
-            GetFlashSpace(flashTotal, flashUsed, flashAvailable);
+            result = GetFlashSpace(flashTotal, flashUsed, flashAvailable);
+            if (result != Core::ERROR_NONE) {
+                LOGERR("GetStats: GetFlashSpace failed");
+                return result;
+            }
 
             stats.flashSpaceTotal = flashTotal;
             stats.flashSpaceUsed = flashUsed;
@@ -529,15 +586,10 @@ namespace WPEFramework {
             uint64_t swapFree = 0;
             uint64_t swapTotal, total = 0;
             double psiFullAvg60 = 0.0;
-            uint32_t memResult = 0;
             LOGINFO("Reactive monitor started");
 
             while (_reactiveMonitorRunning.load()) {
-                memResult = GetMemInfo(memAvailable, swapFree, swapTotal);
-
-                if (memResult != Core::ERROR_NONE) {
-                    LOGERR("Reactive monitor: GetMemInfo failed");
-                }
+                bool memInfoValid = (GetMemInfo(memAvailable, swapFree, swapTotal) == Core::ERROR_NONE);
 
                 if (_config.PsiCheckingEnabled()) {
                     const uint32_t psiResult = GetPsiMetrics("full_avg60", psiFullAvg60, total);
@@ -547,7 +599,7 @@ namespace WPEFramework {
                     }
                 }
 
-                EvaluateResourceThresholds(memAvailable, swapFree, swapTotal, psiFullAvg60);
+                EvaluateResourceThresholds(memInfoValid, memAvailable, swapFree, swapTotal, psiFullAvg60);
                 // Wait until next poll
                 std::unique_lock<std::mutex> lock(_reactiveMonitorMutex);
                 _reactiveMonitorCv.wait_for(
@@ -560,23 +612,34 @@ namespace WPEFramework {
             LOGINFO("Reactive monitor stopped");
         }
 
-        void ResourceMonitorImplementation::EvaluateResourceThresholds(uint64_t memAvailable, uint64_t swapFree, uint64_t swapTotal, double psiFullAvg60)
+        void ResourceMonitorImplementation::EvaluateResourceThresholds(bool memInfoValid, uint64_t memAvailable, uint64_t swapFree, uint64_t swapTotal, double psiFullAvg60)
         {
             bool warningCondition = false;
             uint32_t swapPercentage = 0;
             uint64_t now = 0, swapUsed = 0, memUsedTotal = 0 , swapTotalBytes = 0, total =0;
+            bool hardEvictionRequired = false;
+            bool softEvictionRequired = false;
+            std::string evictionReason;
+            std::string evictionAction;
+            bool psiEvictionCandidate = false;
 
             LOGINFO("Low_memory_warning_enabled=%u", _config.LowMemoryWarningsEnabled());
             if (_config.LowMemoryWarningsEnabled()) {
                 LOGINFO("INFO memAvailable=%llu", static_cast<unsigned long long>(memAvailable));
-                if (memAvailable) {
+                if (memInfoValid) {
                     if (memAvailable <= _config.HardThresholdMinMem()) {
                         LOGWARN("Hard MEMORY threshold exceeded");
-                        Evict("HardMemoryThresholdReached", "Kill");
+                        hardEvictionRequired = true;
+                        evictionReason = "HardMemoryThresholdReached";
+                        evictionAction = "Kill";
                     }
                     else if (memAvailable <= _config.SoftThresholdMinMem()) {
                         LOGWARN("Soft MEMORY threshold exceeded");
-                        Evict("SoftMemoryThresholdReached", "terminate");
+                        if (!hardEvictionRequired) {
+                            softEvictionRequired = true;
+                            evictionReason = "SoftMemoryThresholdReached";
+                            evictionAction = "terminate";
+                        }
                     }
                     else if (memAvailable <= _config.WarningThresholdMinMem()) {
                         warningCondition = true;
@@ -594,11 +657,17 @@ namespace WPEFramework {
                     LOGINFO("SWAP percentage: %.2f", (static_cast<double>(swapUsed) * 100.0) / static_cast<double>(swapTotalBytes));
                     if (swapPercentage >= _config.HardThresholdMaxSwapPercentage()) {
                         LOGWARN("Hard SWAP threshold exceeded");
-                        Evict("HardSwapThresholdReached", "Kill");
+                        hardEvictionRequired = true;
+                        evictionReason = "HardSwapThresholdReached";
+                        evictionAction = "Kill";
                     }
                     else if (swapPercentage >= _config.SoftThresholdMaxSwapPercentage()) {
                         LOGWARN("Soft SWAP threshold exceeded");
-                        Evict("SoftSwapThresholdReached", "terminate");
+                        if (!hardEvictionRequired && !softEvictionRequired) {
+                            softEvictionRequired = true;
+                            evictionReason = "SoftSwapThresholdReached";
+                            evictionAction = "terminate";
+                        }
                     }
                     else if (swapPercentage >= _config.WarningThresholdMaxSwapPercentage()) {
                         warningCondition = true;
@@ -613,11 +682,13 @@ namespace WPEFramework {
                         if (_psiThresholdExceededSince == 0) {
                             _psiThresholdExceededSince = nowMs;
                         }
-                        if (_lastPsiActionTime == 0 || (nowMs - _psiThresholdExceededSince) >= _config.PsiExcessDuration()) {
-                            if ((nowMs - _lastPsiActionTime) >= _config.PsiPostActionDelay()) {
+                        if ((nowMs - _psiThresholdExceededSince) >= _config.PsiExcessDuration()) {
+                             if (_lastPsiActionTime == 0 || (nowMs - _lastPsiActionTime) >= _config.PsiPostActionDelay()) {
                                 LOGWARN("Hard PSI threshold exceeded");
-                                Evict("HardPsiThresholdExceeded", "Kill");
-                                _lastPsiActionTime = nowMs;
+                                hardEvictionRequired = true;
+                                evictionReason = "HardPsiThresholdExceeded";
+                                evictionAction = "Kill";
+                                psiEvictionCandidate = true;
                             }
                         }
                     }
@@ -626,10 +697,14 @@ namespace WPEFramework {
                             _psiThresholdExceededSince = nowMs;
                         }
                         if ((nowMs - _psiThresholdExceededSince) >= _config.PsiExcessDuration()) {
-                            if ((nowMs - _lastPsiActionTime) >= _config.PsiPostActionDelay()) {
+                            if (_lastPsiActionTime == 0 || (nowMs - _lastPsiActionTime) >= _config.PsiPostActionDelay()) {
                                 LOGWARN("Soft PSI threshold exceeded");
-                                Evict("SoftPsiThresholdExceeded", "terminate");
-                                _lastPsiActionTime = nowMs;
+                                if (!hardEvictionRequired) {
+                                    softEvictionRequired = true;
+                                    evictionReason = "SoftPsiThresholdExceeded";
+                                    evictionAction = "terminate";
+                                    psiEvictionCandidate = true;
+                                }
                             }
                         }
                     }
@@ -638,6 +713,19 @@ namespace WPEFramework {
                         if (psiFullAvg60 >= _config.WarningThresholdMaxPsi()) {
                             warningCondition = true;
                         }
+                    }
+                }
+
+                if (hardEvictionRequired) {
+                    const Core::hresult result = Evict(evictionReason, evictionAction, EvictionOwner::REACTIVE);
+                    if (result == Core::ERROR_NONE && psiEvictionCandidate) {
+                        _lastPsiActionTime = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+                    }
+                }
+                else if (softEvictionRequired) {
+                    const Core::hresult result = Evict(evictionReason, evictionAction, EvictionOwner::REACTIVE);
+                    if (result == Core::ERROR_NONE && psiEvictionCandidate) {
+                        _lastPsiActionTime = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
                     }
                 }
 
@@ -699,7 +787,7 @@ namespace WPEFramework {
 
             // Not enough memory and allowTerminate=true -> VictimSelector evict.
             LOGINFO("Reconcile: insufficient memory, requesting VictimSelector eviction");
-            const Core::hresult evictionResult = Evict("systemMemoryLow", "terminate");
+            const Core::hresult evictionResult = Evict("systemMemoryLow", "terminate", EvictionOwner::RECONCILE);
             if (evictionResult != Core::ERROR_NONE) {
                 LOGERR("Reconcile: VictimSelector eviction request failed: %u", evictionResult);
                 CompleteReconcile(false);
@@ -771,7 +859,7 @@ namespace WPEFramework {
             _reconcileConditionVariable.notify_one();
         }
 
-        Core::hresult ResourceMonitorImplementation::Evict(const std::string& reason, const std::string& action)
+        Core::hresult ResourceMonitorImplementation::Evict(const std::string& reason, const std::string& action, EvictionOwner owner)
         {
             Exchange::IVictimSelector::EvictionReason evictionReason = Exchange::IVictimSelector::EVICTION_REASON_RAM;
             Exchange::IVictimSelector::EvictionType evictionType = Exchange::IVictimSelector::EVICTION_TYPE_SOFT;
@@ -803,6 +891,7 @@ namespace WPEFramework {
 
             // RAM for now as GPU and FLASH are not implemented yet.
             evictionReason = Exchange::IVictimSelector::EVICTION_REASON_RAM;
+            _evictionOwner.store(owner);
             LOGINFO("Calling VictimSelector::Evict: reason=%s action=%s", reason.c_str(), action.c_str());
 
             const Core::hresult result = _victimSelector->Evict(evictionReason, evictionType);
@@ -821,14 +910,15 @@ namespace WPEFramework {
             uint64_t swapFree = 0;
             uint64_t swapTotal, remainingMemory = 0;
             Core::hresult result = Core::ERROR_NONE;
+            EvictionOwner owner = _evictionOwner.exchange(EvictionOwner::NONE);
             _evictionInProgress = false;
             LOGINFO("VictimSelector::OnEvictComplete: evicted=%s errorCode=%u", evicted ? _T("true") : _T("false"), static_cast<uint32_t>(errorCode));
 
             // No active Reconcile. This eviction was triggered by the reactive resource monitoring path.
             {
                 std::lock_guard<std::mutex> lock(_reconcileMutex);
-                if (!_reconcileInProgress) {
-                    LOGINFO("VictimSelector eviction is not part of reconciliation");
+                if (owner != EvictionOwner::RECONCILE) {
+                    LOGINFO("Reactive eviction completed");
                     return;
                 }
                 appId = _reconcileAppId;
@@ -867,7 +957,7 @@ namespace WPEFramework {
 
             // Still not enough memory. Ask VictimSelector for another victim. The SAME Reconcile remains active.
             LOGWARN("Still insufficient memory. Requesting another eviction");
-            const Core::hresult evictionResult = Evict("systemMemoryLow", "terminate");
+            const Core::hresult evictionResult = Evict("systemMemoryLow", "terminate", EvictionOwner::RECONCILE);
             if (evictionResult != Core::ERROR_NONE) {
                 LOGERR("VictimSelector Evict failed during continued reconciliation");
                 CompleteReconcile(false);

@@ -6,7 +6,7 @@ startuporder = "@PLUGIN_RESOURCEMONITOR_STARTUPORDER@"
 configuration = JSON()
 rootobject = JSON()
 
-rootobject.add("mode", "@PLUGIN_RESOURCEMONITOR_MODE@")
+rootobject.add("mode", "@PLUGIN_RESOURCEMONITOR_STARTMODE@")
 rootobject.add("locator", "lib@PLUGIN_IMPLEMENTATION@.so")
 
 # Add plugin-specific configuration parameters

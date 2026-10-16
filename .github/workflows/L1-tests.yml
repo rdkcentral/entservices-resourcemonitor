@@ -131,6 +131,7 @@ jobs:
         if: ${{ inputs.caller_source == 'testframework' }}
         uses: actions/checkout@v3
         with:
+          repository: rdkcentral/entservices-resourcemonitor
           path: entservices-resourcemonitor
           ref: develop
 
@@ -212,6 +213,7 @@ jobs:
           repository: rdkcentral/entservices-apis
           path: entservices-apis
           ref: ${{env.INTERFACES_REF}}
+      
       - name: Remove unsupported DTV definition
         run: rm -rf "$GITHUB_WORKSPACE/entservices-apis/jsonrpc/DTV.json"
 

@@ -150,6 +150,46 @@ bool ResourceMonitorConfig::CalculatePsiThresholds()
     return true;
 }
 
+bool ResourceMonitorConfig::ValidateThresholdConfiguration()
+{
+    bool fallbackRequired = false;
+    if (!CalculateMemoryThresholds()) {
+        LOGWARN("Invalid memory threshold configuration");
+        _warningThresholdMinMem = ResourceMonitorConfig::DEFAULT_WARNING_MIN_MEM;
+        fallbackRequired = true;
+    }
+
+    if (!CalculateSwapThresholds()) {
+        LOGWARN("Invalid swap threshold configuration");
+        _warningThresholdMaxSwapPercentage = ResourceMonitorConfig::DEFAULT_WARNING_MAX_SWAP;
+        fallbackRequired = true;
+    }
+
+    if (!CalculatePsiThresholds()) {
+        LOGWARN("Invalid PSI threshold configuration");
+        _warningThresholdMaxPsi = ResourceMonitorConfig::DEFAULT_WARNING_MAX_PSI;
+        fallbackRequired = true;
+    }
+
+    if (fallbackRequired) {
+        _softThresholdDeltaPercentage = ResourceMonitorConfig::DEFAULT_SOFT_THRESHOLD_DELTA;
+        _hardThresholdDeltaPercentage = ResourceMonitorConfig::DEFAULT_HARD_THRESHOLD_DELTA;
+        if (!CalculateMemoryThresholds()) {
+            _warningThresholdMinMem = ResourceMonitorConfig::DEFAULT_WARNING_MIN_MEM;
+            CalculateMemoryThresholds();
+        }
+        if (!CalculateSwapThresholds()) {
+            _warningThresholdMaxSwapPercentage = ResourceMonitorConfig::DEFAULT_WARNING_MAX_SWAP;
+            CalculateSwapThresholds();
+        }
+        if (!CalculatePsiThresholds()) {
+            _warningThresholdMaxPsi = ResourceMonitorConfig::DEFAULT_WARNING_MAX_PSI;
+            CalculatePsiThresholds();
+        }
+    }
+    return true;
+}
+
 bool ResourceMonitorConfig::Load(const ResourceMonitorConfigJSON& json)
 {
     SetDefaults();
@@ -314,29 +354,7 @@ bool ResourceMonitorConfig::Load(const ResourceMonitorConfigJSON& json)
     #endif
 
     // Calculate derived thresholds.
-    if (!CalculateMemoryThresholds()) {
-        LOGWARN("Invalid calculated memory thresholds.Reverting warning threshold to default.");
-        _warningThresholdMinMem = ResourceMonitorConfig::DEFAULT_WARNING_MIN_MEM;
-        _softThresholdDeltaPercentage = ResourceMonitorConfig::DEFAULT_SOFT_THRESHOLD_DELTA;
-        _hardThresholdDeltaPercentage = ResourceMonitorConfig::DEFAULT_HARD_THRESHOLD_DELTA;
-        CalculateMemoryThresholds();
-    }
-
-    if (!CalculateSwapThresholds()) {
-        LOGWARN("Invalid calculated swap thresholds. Reverting warning threshold to default.");
-        _warningThresholdMaxSwapPercentage = ResourceMonitorConfig::DEFAULT_WARNING_MAX_SWAP;
-        _softThresholdDeltaPercentage = ResourceMonitorConfig::DEFAULT_SOFT_THRESHOLD_DELTA;
-        _hardThresholdDeltaPercentage = ResourceMonitorConfig::DEFAULT_HARD_THRESHOLD_DELTA;
-        CalculateSwapThresholds();
-    }
-
-    if (!CalculatePsiThresholds()) {
-        LOGWARN("Invalid calculated PSI thresholds. Reverting warning threshold to default.");
-        _warningThresholdMaxPsi = ResourceMonitorConfig::DEFAULT_WARNING_MAX_PSI;
-        _softThresholdDeltaPercentage = ResourceMonitorConfig::DEFAULT_SOFT_THRESHOLD_DELTA;
-        _hardThresholdDeltaPercentage = ResourceMonitorConfig::DEFAULT_HARD_THRESHOLD_DELTA;
-        CalculatePsiThresholds();
-    }
+    ValidateThresholdConfiguration();
 
     LOGINFO("ResourceMonitor configuration loaded");
     LOGINFO("psi_metrics=%d", static_cast<int>(_psiMetric));

@@ -25,7 +25,7 @@ set(TEST_LIB
     ${NAMESPACE}Plugins::${NAMESPACE}Plugins
 )
 
-find_package(GTest REQUIRED)
+find_package(GTest CONFIG REQUIRED)
 
 
 ################################################################################
